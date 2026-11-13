@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Scope manifests point at local paths; keep real ones out of version control.
+*.scope.toml
+!examples/*.toml
+
+# Scan output may reference sensitive locations.
+soterion-report*/

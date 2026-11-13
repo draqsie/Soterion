@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soterion"
+version = "0.0.1"
+description = "Read-only security review of repositories you own or are authorized to review."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+soterion = "soterion.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,39 @@
+# Example Soterion scope manifest.
+#
+# Keep the real manifest OUTSIDE the repository it describes. Soterion rejects
+# a manifest stored inside the target repository, so that repository content can
+# never define or widen its own scope.
+
+schema_version = 1
+
+[target]
+# Absolute path to a repository on a local disk. URLs and network shares are rejected.
+repo_path = "/absolute/path/to/your/repository"
+
+[authorization]
+# "owner"      - you own this repository.
+# "authorized" - you have explicit permission to review it; `reference` is then required.
+basis = "owner"
+# Your declaration that the basis above is true. Soterion cannot verify it.
+attestation = true
+# reference = "where the permission is recorded, e.g. a ticket or engagement id"
+
+[scope]
+# Only files matching `include` may be read. Patterns are relative to the
+# repository root, use forward slashes, and are case-sensitive.
+include = ["**/*.py", "**/requirements*.txt", "**/Dockerfile", ".github/workflows/*.yml"]
+# `exclude` wins over `include` and ignores letter case.
+exclude = ["tests/fixtures/**", "**/node_modules/**"]
+
+[actions]
+# "analyze" is read-only. Add "propose-fix" to allow fixes on a separate branch
+# (not implemented yet). Merging and deploying are never available.
+allowed = ["analyze"]
+
+[limits]
+# Optional. A file above the size limit is skipped and reported, and the scan is
+# then "incomplete" until you exclude that file or raise the limit.
+max_file_size_bytes = 1048576
+# Exceeding either of these rejects the scope instead of scanning a partial list.
+max_files = 20000
+max_total_bytes = 1073741824
