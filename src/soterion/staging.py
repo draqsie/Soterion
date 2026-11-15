@@ -36,15 +36,19 @@ class Snapshot:
     files: tuple[str, ...]
     skipped: tuple[SkippedPath, ...]
     container: Path  # private parent of ``root``; holds nothing else
+    scratch: Path  # private, initially empty; for tool state such as a throwaway home
 
 
 @contextmanager
 def staged_snapshot(scope: Scope, resolution: ScopeResolution) -> Iterator[Snapshot]:
     """Copy the resolved files into a temporary directory that is removed on exit."""
-    container = Path(tempfile.mkdtemp(prefix="soterion-")).resolve()
+    workspace = Path(tempfile.mkdtemp(prefix="soterion-")).resolve()
+    container = workspace / "scan"
     root = container / FILES_DIRNAME
+    scratch = workspace / "scratch"
     try:
-        root.mkdir()
+        root.mkdir(parents=True)
+        scratch.mkdir()
         files: list[str] = []
         skipped: list[SkippedPath] = []
         for relative in resolution.files:
@@ -54,10 +58,26 @@ def staged_snapshot(scope: Scope, resolution: ScopeResolution) -> Iterator[Snaps
             else:
                 skipped.append(SkippedPath(relative, reason))
         yield Snapshot(
-            root=root, files=tuple(files), skipped=tuple(skipped), container=container
+            root=root,
+            files=tuple(files),
+            skipped=tuple(skipped),
+            container=container,
+            scratch=scratch,
         )
     finally:
-        shutil.rmtree(container)
+        shutil.rmtree(workspace)
+
+
+def snapshot_relative(reported_path: str) -> str:
+    """Turn a path a tool reported while running in the container into a repository path.
+
+    Raises ValueError when the path does not lie inside the copied files.
+    """
+    prefix = f"{FILES_DIRNAME}/"
+    path = reported_path.replace("\\", "/")
+    if not path.startswith(prefix) or len(path) == len(prefix):
+        raise ValueError("the tool reported a file outside the snapshot")
+    return path[len(prefix) :]
 
 
 def _copy_file(scope: Scope, relative: str, staging_root: Path) -> str | None:

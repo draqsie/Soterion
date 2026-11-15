@@ -51,6 +51,18 @@ class Staging(RepoTestCase):
 
         self.assertFalse(container.exists())
 
+    def test_scratch_directory_is_private_and_separate_from_what_scanners_see(self) -> None:
+        self.add_file("a.py")
+
+        with staged_snapshot(*self.listed()) as snapshot:
+            scratch = snapshot.scratch
+            self.assertTrue(scratch.is_dir())
+            self.assertEqual(list(scratch.iterdir()), [])
+            self.assertFalse(scratch.is_relative_to(snapshot.container))
+            self.assertFalse(scratch.is_relative_to(self.repo))
+
+        self.assertFalse(scratch.exists())
+
     def test_snapshot_is_removed_when_the_scan_raises(self) -> None:
         self.add_file("a.py")
         roots = []

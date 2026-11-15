@@ -9,6 +9,7 @@ follows links; files are selected by name and metadata only.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import tomllib
 from dataclasses import dataclass
@@ -38,8 +39,10 @@ _SECTION_KEYS: dict[str, frozenset[str]] = {
     "scope": frozenset({"include", "exclude"}),
     "actions": frozenset({"allowed"}),
     "limits": frozenset({"max_file_size_bytes", "max_files", "max_total_bytes"}),
+    "network": frozenset({"allowed_checks"}),
 }
-_OPTIONAL_SECTIONS = frozenset({"limits"})
+_OPTIONAL_SECTIONS = frozenset({"limits", "network"})
+_CHECK_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 
 
 class ScopeError(ValueError):
@@ -60,6 +63,8 @@ class Scope:
     max_file_size_bytes: int
     max_files: int
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES
+    # Ids of the checks that may contact the network. Empty unless the manifest says so.
+    network_checks: frozenset[str] = frozenset()
 
     def permits(self, action: str) -> bool:
         return action in self.allowed_actions
@@ -103,6 +108,7 @@ def load_scope(manifest_path: str | os.PathLike[str]) -> Scope:
         sections["limits"], "max_file_size_bytes", DEFAULT_MAX_FILE_SIZE_BYTES, problems
     )
     max_files = _check_limit(sections["limits"], "max_files", DEFAULT_MAX_FILES, problems)
+    network_checks = _check_network(sections["network"], problems)
     max_total = _check_limit(
         sections["limits"], "max_total_bytes", DEFAULT_MAX_TOTAL_BYTES, problems
     )
@@ -118,6 +124,7 @@ def load_scope(manifest_path: str | os.PathLike[str]) -> Scope:
         max_file_size_bytes=max_file_size,
         max_files=max_files,
         max_total_bytes=max_total,
+        network_checks=network_checks,
     )
 
 
@@ -339,6 +346,22 @@ def _check_actions(section: dict[str, Any], problems: list[str], *, present: boo
     if "analyze" not in allowed:
         problems.append("actions.allowed: must contain 'analyze'; every other action builds on it")
     return frozenset(allowed) & ACTIONS
+
+
+def _check_network(section: dict[str, Any], problems: list[str]) -> frozenset[str]:
+    if "allowed_checks" not in section:
+        return frozenset()
+    allowed = section["allowed_checks"]
+    valid = isinstance(allowed, list) and all(
+        isinstance(item, str) and _CHECK_ID.fullmatch(item) for item in allowed
+    )
+    if not valid:
+        problems.append(
+            "network.allowed_checks: must be a list of check ids (lowercase letters, "
+            "digits and hyphens) naming the checks that may use the network"
+        )
+        return frozenset()
+    return frozenset(allowed)
 
 
 def _check_limit(section: dict[str, Any], name: str, default: int, problems: list[str]) -> int:

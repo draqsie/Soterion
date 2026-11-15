@@ -37,6 +37,17 @@ class ValidManifest(RepoTestCase):
         self.assertTrue(scope.permits("analyze"))
 
 
+    def test_no_check_may_use_the_network_by_default(self) -> None:
+        self.assertEqual(load_scope(self.write_manifest()).network_checks, frozenset())
+
+    def test_network_access_is_granted_per_check(self) -> None:
+        scope = load_scope(
+            self.write_manifest(network='[network]\nallowed_checks = ["semgrep"]\n')
+        )
+
+        self.assertEqual(scope.network_checks, frozenset({"semgrep"}))
+
+
 class RejectedManifest(RepoTestCase):
     def assert_rejected(self, mention: str, **sections: str) -> None:
         with self.assertRaises(ScopeError) as caught:
@@ -157,6 +168,16 @@ class RejectedManifest(RepoTestCase):
         ):
             with self.subTest(key=key, value=value):
                 self.assert_rejected(key, limits=f"[limits]\n{key} = {value}\n")
+
+    def test_network_permission_must_be_a_list_of_check_ids(self) -> None:
+        for value in ('"semgrep"', "[1]", '["Not A Check Id"]', "true"):
+            with self.subTest(value):
+                self.assert_rejected(
+                    "allowed_checks", network=f"[network]\nallowed_checks = {value}\n"
+                )
+
+    def test_unknown_network_key(self) -> None:
+        self.assert_rejected("allow_all", network="[network]\nallow_all = true\n")
 
     def test_all_problems_are_reported_together(self) -> None:
         with self.assertRaises(ScopeError) as caught:

@@ -10,7 +10,7 @@ reported as skipped or failed; it is never folded into "no findings".
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -25,6 +25,28 @@ class ToolLocator(Protocol):
 
 
 @dataclass(frozen=True)
+class ParsedOutput:
+    """What a parser understood from a tool's output.
+
+    ``problem`` is set when the tool ran but did not fully do its job (for
+    example, it could not parse some files); it fails the check.
+    ``limitation`` describes a narrow, known gap that does not fail the check
+    but must stay visible next to its result. ``examined_files`` lists the
+    repository-relative files the tool says it examined, when it reports that;
+    any in-scope file missing from it fails the check.
+    """
+
+    findings: Sequence[Finding]
+    problem: str = ""
+    examined_files: frozenset[str] | None = None
+    limitation: str = ""
+
+
+def _no_extra_environment(snapshot: Snapshot) -> Mapping[str, str]:
+    return {}
+
+
+@dataclass(frozen=True)
 class ToolCheck:
     """One external scanner: how to invoke it and how to read what it prints."""
 
@@ -32,11 +54,20 @@ class ToolCheck:
     tool: str
     applies_to: Callable[[tuple[str, ...]], bool]
     arguments: Callable[[Snapshot], Sequence[str]]
-    parse: Callable[[bytes], Sequence[Finding]]
+    # Called with the tool's standard output, and also with the snapshot when
+    # parse_with_snapshot is set (for tools that do not report line numbers).
+    parse: Callable[..., Sequence[Finding] | ParsedOutput]
     success_exit_codes: frozenset[int] = frozenset({0})
+    # Exit codes by which the tool itself says there was nothing for it to check.
+    not_applicable_exit_codes: frozenset[int] = frozenset()
+    parse_with_snapshot: bool = False
     timeout_seconds: float = 600
     max_output_bytes: int = 50 * 1024 * 1024
-    environment: Mapping[str, str] = field(default_factory=dict)
+    # Extra environment for the tool. It may point the tool at snapshot.scratch.
+    environment: Callable[[Snapshot], Mapping[str, str]] = _no_extra_environment
+    # Non-empty when the tool contacts the network; says what for. Such a check
+    # only runs when the scope manifest names it under [network] allowed_checks.
+    network_use: str = ""
     # Run from the snapshot's container instead of the copied files, for tools
     # that read suppression or configuration files from the directory they scan.
     run_in_container: bool = False
@@ -49,6 +80,7 @@ class ScanReport:
     skipped: tuple[SkippedPath, ...]
     file_count: int
     summary: ScanSummary
+    network_used: tuple[str, ...] = ()  # ids of the checks that were run with network access
 
 
 def run_scan(
@@ -77,6 +109,11 @@ def run_scan(
         skipped=skipped,
         file_count=file_count,
         summary=summarize(results, findings, skipped_path_count=len(skipped)),
+        network_used=tuple(
+            check.check_id
+            for check, result in zip(checks, results, strict=True)
+            if check.network_use and result.status in (CheckStatus.COMPLETED, CheckStatus.FAILED)
+        ),
     )
 
 
@@ -89,7 +126,16 @@ def _run_check(
     if not check.applies_to(snapshot.files):
         return outcome(CheckStatus.NOT_APPLICABLE, "no relevant files in scope"), ()
 
-    executable = locate(check.tool, forbidden_roots=(scope.repo_root, snapshot.container))
+    if check.network_use and check.check_id not in scope.network_checks:
+        detail = (
+            f"needs network access ({check.network_use}); to allow it, add "
+            f'"{check.check_id}" to allowed_checks under [network] in the scope manifest'
+        )
+        return outcome(CheckStatus.SKIPPED, detail), ()
+
+    executable = locate(
+        check.tool, forbidden_roots=(scope.repo_root, snapshot.container, snapshot.scratch)
+    )
     if executable is None:
         return outcome(CheckStatus.SKIPPED, f"{check.tool} was not found on PATH"), ()
 
@@ -98,7 +144,7 @@ def _run_check(
         cwd=snapshot.container if check.run_in_container else snapshot.root,
         timeout_seconds=check.timeout_seconds,
         max_output_bytes=check.max_output_bytes,
-        env=check.environment,
+        env=check.environment(snapshot),
     )
     if run.outcome is ToolOutcome.START_FAILED:
         return outcome(CheckStatus.FAILED, f"{check.tool} could not be started"), ()
@@ -108,24 +154,42 @@ def _run_check(
     if run.outcome is ToolOutcome.OUTPUT_TOO_LARGE:
         detail = f"{check.tool} printed more than {check.max_output_bytes} bytes"
         return outcome(CheckStatus.FAILED, detail), ()
+    if run.exit_code in check.not_applicable_exit_codes:
+        detail = f"{check.tool} found nothing in scope that it can check"
+        return outcome(CheckStatus.NOT_APPLICABLE, detail), ()
     if run.exit_code not in check.success_exit_codes:
         detail = f"{check.tool} exited with unexpected code {run.exit_code}"
         return outcome(CheckStatus.FAILED, detail), ()
 
     try:
-        reported = tuple(check.parse(run.stdout))
+        if check.parse_with_snapshot:
+            parsed = check.parse(run.stdout, snapshot)
+        else:
+            parsed = check.parse(run.stdout)
+        output = parsed if isinstance(parsed, ParsedOutput) else ParsedOutput(parsed)
+        reported = tuple(output.findings)
     except Exception:  # noqa: BLE001 - output is untrusted; any parsing error fails the check
         return outcome(CheckStatus.FAILED, f"{check.tool} output could not be parsed"), ()
 
     accepted = _attributable(reported, check, snapshot)
+    problems: list[str] = []
     rejected = len(reported) - len(accepted)
     if rejected:
-        detail = (
+        problems.append(
             f"{rejected} reported finding(s) were rejected because they do not point at "
             "an existing line of an in-scope file"
         )
-        return outcome(CheckStatus.FAILED, detail), accepted
-    return outcome(CheckStatus.COMPLETED), accepted
+    if output.problem:
+        problems.append(output.problem)
+    if output.examined_files is not None:
+        unexamined = len(set(snapshot.files) - output.examined_files)
+        if unexamined:
+            problems.append(f"{unexamined} in-scope file(s) were not examined by {check.tool}")
+    if problems:
+        if output.limitation:
+            problems.append(output.limitation)
+        return outcome(CheckStatus.FAILED, "; ".join(problems)), accepted
+    return outcome(CheckStatus.COMPLETED, output.limitation), accepted
 
 
 def _attributable(

@@ -7,9 +7,17 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from soterion.findings import CheckResult, CheckStatus, ScanStatus
-from soterion.scan import ScanReport, ToolCheck, run_scan
+from soterion.scan import ParsedOutput, ScanReport, ToolCheck, run_scan
 from soterion.scope import SkippedPath, load_scope
-from tests.helpers import RepoTestCase, emitting, fake_check, locate_python, write_tool
+from soterion.staging import Snapshot
+from tests.helpers import (
+    RepoTestCase,
+    emitting,
+    fake_check,
+    locate_python,
+    parse_items,
+    write_tool,
+)
 
 LIST_VISIBLE_FILES = """\
 import json, os
@@ -87,7 +95,9 @@ class RunScan(RepoTestCase):
         run_scan(load_scope(self.write_manifest()), [fake_check(Path("unused"))], locate=locate)
 
         self.assertIn(self.repo, forbidden)
-        self.assertEqual(len(forbidden), 2)
+        temporary = [root for root in forbidden if root != self.repo]
+        self.assertEqual(len(temporary), 2)  # the snapshot container and the scratch directory
+        self.assertFalse(any(root.is_relative_to(self.repo) for root in temporary))
 
     def test_missing_tool_is_skipped_and_the_scan_is_incomplete(self) -> None:
         self.add_file("a.py")
@@ -128,6 +138,30 @@ class RunScan(RepoTestCase):
 
         self.assertEqual(report.checks[0].status, CheckStatus.COMPLETED)
         self.assertEqual(len(report.findings), 1)
+
+    def test_exit_code_meaning_nothing_to_check_makes_the_check_not_applicable(self) -> None:
+        self.add_file("a.py")
+        script = self.tool("nothing", emitting([], exit_code=128))
+
+        report = self.scan(fake_check(script, not_applicable_exit_codes=frozenset({128})))
+
+        self.assertEqual(report.checks[0].status, CheckStatus.NOT_APPLICABLE)
+
+    def test_parser_can_be_given_the_snapshot_to_locate_evidence(self) -> None:
+        self.add_file("a.py", "one\ntwo\n")
+        seen: list[tuple[str, ...]] = []
+
+        def parse(raw: bytes, snapshot: Snapshot) -> list[object]:
+            seen.append(snapshot.files)
+            self.assertTrue((snapshot.root / "a.py").is_file())
+            return []
+
+        report = self.scan(
+            fake_check(self.tool("quiet", emitting([])), parse=parse, parse_with_snapshot=True)
+        )
+
+        self.assertEqual(report.checks[0].status, CheckStatus.COMPLETED)
+        self.assertEqual(seen, [("a.py",)])
 
     def test_unparseable_output_is_a_failed_check(self) -> None:
         self.add_file("a.py")
@@ -221,6 +255,139 @@ class RunScan(RepoTestCase):
 
         self.assertEqual(report.findings, ())
         self.assertEqual(report.checks[0].status, CheckStatus.FAILED)
+
+    def test_check_that_needs_the_network_is_skipped_and_not_run_without_permission(self) -> None:
+        self.add_file("a.py")
+        marker = self.tmp / "ran.txt"
+        script = self.tool("marks", f"open({str(marker)!r}, 'w').write('ran')\nprint('[]')\n")
+
+        report = self.scan(fake_check(script, network_use="downloads rules from example.test"))
+
+        self.assertEqual(report.checks[0].status, CheckStatus.SKIPPED)
+        self.assertIn("network", report.checks[0].detail)
+        self.assertFalse(marker.exists())
+        self.assertEqual(report.summary.status, ScanStatus.INCOMPLETE)
+
+    def test_check_that_needs_the_network_runs_when_the_manifest_allows_it(self) -> None:
+        self.add_file("a.py")
+        check = fake_check(
+            self.tool("quiet", emitting([])), network_use="downloads rules from example.test"
+        )
+
+        report = self.scan(check, network='[network]\nallowed_checks = ["fake"]\n')
+
+        self.assertEqual(report.checks[0].status, CheckStatus.COMPLETED)
+        self.assertEqual(report.network_used, ("fake",))
+
+    def test_network_permission_for_one_check_does_not_cover_another(self) -> None:
+        self.add_file("a.py")
+        check = fake_check(
+            self.tool("quiet", emitting([])), network_use="downloads rules from example.test"
+        )
+
+        report = self.scan(check, network='[network]\nallowed_checks = ["other"]\n')
+
+        self.assertEqual(report.checks[0].status, CheckStatus.SKIPPED)
+        self.assertEqual(report.network_used, ())
+
+    def test_problem_reported_by_the_parser_fails_the_check_but_keeps_its_findings(self) -> None:
+        self.add_file("a.py")
+        script = self.tool("reports", emitting([{"rule": "r1", "path": "a.py", "line": 1}]))
+        parse = parse_items("fake")
+
+        report = self.scan(
+            fake_check(
+                script, parse=lambda raw: ParsedOutput(parse(raw), problem="2 files not parsed")
+            )
+        )
+
+        self.assertEqual(report.checks[0].status, CheckStatus.FAILED)
+        self.assertIn("2 files not parsed", report.checks[0].detail)
+        self.assertEqual([f.rule_id for f in report.findings], ["r1"])
+
+    def test_limitation_reported_by_the_parser_is_shown_on_a_completed_check(self) -> None:
+        self.add_file("a.py")
+        script = self.tool("quiet", emitting([]))
+
+        report = self.scan(
+            fake_check(script, parse=lambda raw: ParsedOutput([], limitation="1 rule skipped"))
+        )
+
+        self.assertEqual(
+            report.checks, (CheckResult("fake", CheckStatus.COMPLETED, "1 rule skipped"),)
+        )
+        self.assertEqual(report.summary.status, ScanStatus.NO_FINDINGS)
+
+    def test_limitation_is_kept_in_the_detail_of_a_failed_check(self) -> None:
+        self.add_file("a.py")
+        script = self.tool("quiet", emitting([]))
+
+        report = self.scan(
+            fake_check(
+                script,
+                parse=lambda raw: ParsedOutput([], problem="1 file broken", limitation="1 rule skipped"),
+            )
+        )
+
+        self.assertEqual(report.checks[0].status, CheckStatus.FAILED)
+        self.assertIn("1 file broken", report.checks[0].detail)
+        self.assertIn("1 rule skipped", report.checks[0].detail)
+
+    def test_in_scope_file_the_tool_did_not_examine_fails_the_check(self) -> None:
+        self.add_file("a.py")
+        self.add_file("b.py")
+        script = self.tool("quiet", emitting([]))
+
+        report = self.scan(
+            fake_check(
+                script, parse=lambda raw: ParsedOutput([], examined_files=frozenset({"a.py"}))
+            )
+        )
+
+        self.assertEqual(report.checks[0].status, CheckStatus.FAILED)
+        self.assertIn("1 in-scope file", report.checks[0].detail)
+
+    def test_check_completes_when_the_tool_examined_every_in_scope_file(self) -> None:
+        self.add_file("a.py")
+        self.add_file("b.py")
+        script = self.tool("quiet", emitting([]))
+
+        report = self.scan(
+            fake_check(
+                script,
+                parse=lambda raw: ParsedOutput([], examined_files=frozenset({"a.py", "b.py"})),
+            )
+        )
+
+        self.assertEqual(report.checks[0].status, CheckStatus.COMPLETED)
+
+    def test_check_environment_can_point_the_tool_at_the_private_scratch_directory(self) -> None:
+        self.add_file("a.py")
+        captured: list[dict[str, str]] = []
+
+        def capture(raw: bytes) -> list[object]:
+            captured.append(json.loads(raw))
+            return []
+
+        script = self.tool(
+            "home",
+            "import json, os\n"
+            "home = os.environ['TOOL_HOME']\n"
+            "print(json.dumps({'home': home, 'is_dir': os.path.isdir(home),"
+            " 'cwd': os.path.realpath(os.getcwd())}))\n",
+        )
+
+        self.scan(
+            fake_check(
+                script,
+                parse=capture,
+                environment=lambda snapshot: {"TOOL_HOME": str(snapshot.scratch)},
+            )
+        )
+
+        self.assertTrue(captured[0]["is_dir"])
+        self.assertFalse(Path(captured[0]["home"]).is_relative_to(Path(captured[0]["cwd"])))
+        self.assertFalse(Path(captured[0]["home"]).is_relative_to(self.repo))
 
     def test_one_failed_check_does_not_stop_the_others(self) -> None:
         self.add_file("a.py")

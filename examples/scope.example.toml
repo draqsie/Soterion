@@ -30,6 +30,13 @@ exclude = ["tests/fixtures/**", "**/node_modules/**"]
 # (not implemented yet). Merging and deploying are never available.
 allowed = ["analyze"]
 
+[network]
+# Checks that may contact the network. Empty by default: such a check is then
+# skipped and the scan is reported as incomplete.
+#   "semgrep"     downloads its rule set from semgrep.dev (metrics disabled).
+#   "osv-scanner" queries api.osv.dev with dependency names and versions.
+allowed_checks = []
+
 [limits]
 # Optional. A file above the size limit is skipped and reported, and the scan is
 # then "incomplete" until you exclude that file or raise the limit.

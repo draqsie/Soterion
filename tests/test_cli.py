@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from soterion.cli import display, main
-from soterion.scan import ToolCheck
+from soterion.scan import ParsedOutput, ToolCheck
 from tests.helpers import RepoTestCase, emitting, fake_check, locate_python, write_tool
 
 
@@ -83,6 +83,26 @@ class ScanCommand(RepoTestCase):
         self.assertIn("fake: completed", out)
         self.assertIn("not proof", out)
 
+    def test_clean_result_with_a_limitation_says_so(self) -> None:
+        self.add_file("a.py")
+        check = fake_check(
+            self.tool("quiet", emitting([])),
+            parse=lambda raw: ParsedOutput([], limitation="1 rule skipped"),
+        )
+
+        code, out, _ = self.run_scan_command(check)
+
+        self.assertEqual(code, 0)
+        self.assertIn("fake: completed - 1 rule skipped", out)
+        self.assertIn("limitations", out)
+
+    def test_clean_result_without_limitations_does_not_mention_any(self) -> None:
+        self.add_file("a.py")
+
+        _, out, _ = self.run_scan_command(fake_check(self.tool("quiet", emitting([]))))
+
+        self.assertNotIn("limitations", out)
+
     def test_findings_exit_one_and_show_location_and_ratings(self) -> None:
         self.add_file("a.py")
         script = self.tool("reports", emitting([{"rule": "r1", "path": "a.py", "line": 1}]))
@@ -95,6 +115,25 @@ class ScanCommand(RepoTestCase):
         self.assertIn("medium", out)
         self.assertIn("unverified", out)
         self.assertIn("false positive", out)
+
+    def test_network_use_is_disclosed_when_a_check_used_it(self) -> None:
+        self.add_file("a.py")
+        check = fake_check(
+            self.tool("quiet", emitting([])), network_use="downloads rules from example.test"
+        )
+
+        _, out, _ = self.run_scan_command(
+            check, network='[network]\nallowed_checks = ["fake"]\n'
+        )
+
+        self.assertIn("Network access used by fake: downloads rules from example.test", out)
+
+    def test_no_network_line_when_no_check_used_the_network(self) -> None:
+        self.add_file("a.py")
+
+        _, out, _ = self.run_scan_command(fake_check(self.tool("quiet", emitting([]))))
+
+        self.assertIn("Network access used: none", out)
 
     def test_missing_tool_exits_three_and_names_the_check(self) -> None:
         self.add_file("a.py")
@@ -165,14 +204,15 @@ class ToolsDirOption(RepoTestCase):
         self.assertEqual(code, 3)
         self.assertIn("fake: skipped", out)
 
-    def test_default_scan_includes_the_secret_check_and_reports_it_when_not_installed(self) -> None:
+    def test_default_scan_lists_every_shipped_check_even_when_none_can_run(self) -> None:
         self.add_file("a.py")
         stdout = io.StringIO()
         with mock.patch.dict(os.environ, {"PATH": ""}), contextlib.redirect_stdout(stdout):
             code = main(["scan", str(self.write_manifest())])
 
         self.assertEqual(code, 3)
-        self.assertIn("gitleaks: skipped", stdout.getvalue())
+        for check_id in ("gitleaks", "semgrep", "osv-scanner"):
+            self.assertIn(f"{check_id}: skipped", stdout.getvalue())
 
     def test_relative_tools_directory_is_a_usage_error(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:

@@ -111,6 +111,12 @@ def _scan(scope: Scope, checks: Sequence[ToolCheck], locate: ToolLocator) -> int
         suffix = f" - {display(check.detail)}" if check.detail else ""
         print(f"  - {display(check.check_id)}: {check.status.value}{suffix}")
 
+    descriptions = {check.check_id: check.network_use for check in checks}
+    if not report.network_used:
+        print("Network access used: none")
+    for check_id in report.network_used:
+        print(f"Network access used by {display(check_id)}: {display(descriptions[check_id])}")
+
     print(f"{len(report.findings)} findings")
     for finding in report.findings:
         first = finding.evidence[0]
@@ -130,15 +136,19 @@ def _scan(scope: Scope, checks: Sequence[ToolCheck], locate: ToolLocator) -> int
 
 def _result_line(report: ScanReport) -> str:
     summary = report.summary
+    limited = any(
+        check.status is CheckStatus.COMPLETED and check.detail for check in report.checks
+    )
+    caveat = " Some checks completed with limitations; see the check list above." if limited else ""
     if summary.status is ScanStatus.NO_FINDINGS:
         return (
             "Result: no findings from the checks listed above. "
-            "This is not proof that the code is free of vulnerabilities."
+            "This is not proof that the code is free of vulnerabilities." + caveat
         )
     if summary.status is ScanStatus.FINDINGS:
         return (
             f"Result: {summary.finding_count} finding(s). Each is a scanner report and may be "
-            "a false positive; review the evidence before acting."
+            "a false positive; review the evidence before acting." + caveat
         )
     reasons = []
     if not any(check.status is CheckStatus.COMPLETED for check in report.checks):
