@@ -10,7 +10,8 @@ from pathlib import Path
 from soterion import __version__
 from soterion.findings import CheckStatus, ScanStatus
 from soterion.runner import find_tool
-from soterion.scan import DEFAULT_CHECKS, ScanReport, ToolCheck, ToolLocator, run_scan
+from soterion.checks import DEFAULT_CHECKS
+from soterion.scan import ScanReport, ToolCheck, ToolLocator, run_scan
 from soterion.scope import Scope, ScopeError, SkippedPath, load_scope, resolve_files
 
 EXIT_NO_FINDINGS = 0
@@ -36,13 +37,32 @@ def main(
     )
     parser.add_argument("--version", action="version", version=f"soterion {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name, summary in (
-        ("scope-check", "validate a scope manifest and count the files it allows (reads no file contents)"),
-        ("scan", "run the available checks on a private copy of the in-scope files (read-only)"),
-    ):
-        command = commands.add_parser(name, help=summary)
+    scope_check = commands.add_parser(
+        "scope-check",
+        help="validate a scope manifest and count the files it allows (reads no file contents)",
+    )
+    scan = commands.add_parser(
+        "scan", help="run the available checks on a private copy of the in-scope files (read-only)"
+    )
+    for command in (scope_check, scan):
         command.add_argument("manifest", type=Path, help="path to the scope manifest (TOML)")
+    scan.add_argument(
+        "--tools-dir",
+        type=Path,
+        action="append",
+        metavar="DIR",
+        help="absolute directory holding scanner executables; repeatable. "
+        "When given, PATH is not searched.",
+    )
     args = parser.parse_args(argv)
+
+    tools_dirs: list[Path] | None = getattr(args, "tools_dir", None)
+    if tools_dirs:
+        if not all(directory.is_absolute() for directory in tools_dirs):
+            parser.error("--tools-dir must be an absolute path")
+
+        def locate(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path | None:
+            return find_tool(name, forbidden_roots=forbidden_roots, directories=tools_dirs)
 
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):

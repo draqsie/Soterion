@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import string
 import subprocess
 import sys
 import tempfile
@@ -13,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from soterion.findings import Confidence, Evidence, Finding, Severity, VerificationStatus
-from soterion.scan import ToolCheck
+from soterion.runner import find_tool
+from soterion.scan import ToolCheck, ToolLocator
 
 _BASE_SECTIONS = {
     "head": "schema_version = 1\n",
@@ -96,6 +99,30 @@ def fake_check(script: Path, *, check_id: str = "fake", **overrides: Any) -> Too
     }
     options.update(overrides)
     return ToolCheck(**options)
+
+
+def real_tool_locator(tool: str) -> ToolLocator:
+    """Locator for a real scanner, or skip the test when it is not installed.
+
+    Integration tests only run when SOTERION_TEST_TOOLS_DIR names one or more
+    directories (separated like PATH) that contain the scanner executables.
+    """
+    raw = os.environ.get("SOTERION_TEST_TOOLS_DIR", "")
+    directories = [Path(entry) for entry in raw.split(os.pathsep) if entry]
+    if not directories or find_tool(tool, directories=directories) is None:
+        raise unittest.SkipTest(f"{tool} not found; set SOTERION_TEST_TOOLS_DIR to run this test")
+
+    def locate(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path | None:
+        return find_tool(name, forbidden_roots=forbidden_roots, directories=directories)
+
+    return locate
+
+
+def fake_github_token() -> str:
+    """A token-shaped string built at run time, so no secret-like literal lives in the repo."""
+    alphabet = string.ascii_letters + string.digits
+    generator = random.Random(7)
+    return "ghp_" + "".join(generator.choice(alphabet) for _ in range(36))
 
 
 def make_symlink(link: Path, target: Path) -> None:

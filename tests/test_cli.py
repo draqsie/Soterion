@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
+import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from soterion.cli import display, main
 from soterion.scan import ToolCheck
@@ -136,6 +139,46 @@ class ScanCommand(RepoTestCase):
         self.assertEqual(out, "")
         self.assertIn("authorization", err)
         self.assertFalse(marker.exists())
+
+
+class ToolsDirOption(RepoTestCase):
+    """Uses the real tool lookup; the stand-in scanner is the Python interpreter itself."""
+
+    def run_scan_command(self, *extra: str) -> tuple[int, str]:
+        self.add_file("a.py")
+        script = write_tool(self.tmp / "tools", "quiet", emitting([]))
+        check = fake_check(script, tool=Path(sys.executable).stem)
+        stdout = io.StringIO()
+        with mock.patch.dict(os.environ, {"PATH": ""}), contextlib.redirect_stdout(stdout):
+            code = main(["scan", str(self.write_manifest()), *extra], checks=[check])
+        return code, stdout.getvalue()
+
+    def test_tool_is_found_in_the_given_directory(self) -> None:
+        code, out = self.run_scan_command("--tools-dir", str(Path(sys.executable).parent))
+
+        self.assertEqual(code, 0)
+        self.assertIn("fake: completed", out)
+
+    def test_without_the_option_a_tool_missing_from_path_is_skipped(self) -> None:
+        code, out = self.run_scan_command()
+
+        self.assertEqual(code, 3)
+        self.assertIn("fake: skipped", out)
+
+    def test_default_scan_includes_the_secret_check_and_reports_it_when_not_installed(self) -> None:
+        self.add_file("a.py")
+        stdout = io.StringIO()
+        with mock.patch.dict(os.environ, {"PATH": ""}), contextlib.redirect_stdout(stdout):
+            code = main(["scan", str(self.write_manifest())])
+
+        self.assertEqual(code, 3)
+        self.assertIn("gitleaks: skipped", stdout.getvalue())
+
+    def test_relative_tools_directory_is_a_usage_error(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            self.run_scan_command("--tools-dir", "tools")
+
+        self.assertEqual(caught.exception.code, 2)
 
 
 class Display(unittest.TestCase):

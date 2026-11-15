@@ -37,6 +37,9 @@ class ToolCheck:
     timeout_seconds: float = 600
     max_output_bytes: int = 50 * 1024 * 1024
     environment: Mapping[str, str] = field(default_factory=dict)
+    # Run from the snapshot's container instead of the copied files, for tools
+    # that read suppression or configuration files from the directory they scan.
+    run_in_container: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,11 +49,6 @@ class ScanReport:
     skipped: tuple[SkippedPath, ...]
     file_count: int
     summary: ScanSummary
-
-
-# Scanner adapters are registered here. None ship yet, so a scan with the
-# default set reports "incomplete" rather than an empty, clean-looking result.
-DEFAULT_CHECKS: tuple[ToolCheck, ...] = ()
 
 
 def run_scan(
@@ -91,13 +89,13 @@ def _run_check(
     if not check.applies_to(snapshot.files):
         return outcome(CheckStatus.NOT_APPLICABLE, "no relevant files in scope"), ()
 
-    executable = locate(check.tool, forbidden_roots=(scope.repo_root, snapshot.root))
+    executable = locate(check.tool, forbidden_roots=(scope.repo_root, snapshot.container))
     if executable is None:
         return outcome(CheckStatus.SKIPPED, f"{check.tool} was not found on PATH"), ()
 
     run = run_tool(
         [str(executable), *(str(argument) for argument in check.arguments(snapshot))],
-        cwd=snapshot.root,
+        cwd=snapshot.container if check.run_in_container else snapshot.root,
         timeout_seconds=check.timeout_seconds,
         max_output_bytes=check.max_output_bytes,
         env=check.environment,

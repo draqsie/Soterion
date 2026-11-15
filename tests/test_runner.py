@@ -165,6 +165,32 @@ class FindTool(TempDirTestCase):
 
         self.assertIsNone(self.find("scanner", repo / "tools", forbidden=(repo,)))
 
+    def test_explicit_directories_are_searched_instead_of_path(self) -> None:
+        expected = self.make_executable(self.tmp / "tools", "scanner")
+        self.make_executable(self.tmp / "bin", "scanner")
+
+        with mock.patch.dict(os.environ, {"PATH": str(self.tmp / "bin")}):
+            found = find_tool("scanner", directories=[self.tmp / "tools"])
+
+        self.assertEqual(found, expected)
+
+    def test_explicit_directories_do_not_fall_back_to_path(self) -> None:
+        self.make_executable(self.tmp / "bin", "scanner")
+        (self.tmp / "tools").mkdir()
+
+        with mock.patch.dict(os.environ, {"PATH": str(self.tmp / "bin")}):
+            found = find_tool("scanner", directories=[self.tmp / "tools"])
+
+        self.assertIsNone(found)
+
+    def test_explicit_directory_inside_a_forbidden_root_is_ignored(self) -> None:
+        repo = self.tmp / "repo"
+        self.make_executable(repo / "tools", "scanner")
+
+        found = find_tool("scanner", directories=[repo / "tools"], forbidden_roots=(repo,))
+
+        self.assertIsNone(found)
+
     @unittest.skipUnless(os.name == "nt", "batch files are a Windows concept")
     def test_batch_files_are_not_accepted_as_tools(self) -> None:
         self.make_executable(self.tmp / "bin", "scanner", ".cmd")

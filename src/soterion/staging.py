@@ -23,18 +23,28 @@ from pathlib import Path
 from soterion.scope import Scope, ScopeResolution, SkippedPath
 
 
+# The copies live one level below the temporary directory. A scanner can then be
+# pointed at the container, so that no repository-controlled file sits at the
+# root it scans. Several scanners read suppression or configuration files from
+# that root, and some cannot be told not to.
+FILES_DIRNAME = "files"
+
+
 @dataclass(frozen=True)
 class Snapshot:
-    root: Path
+    root: Path  # the copied files, at their repository-relative paths
     files: tuple[str, ...]
     skipped: tuple[SkippedPath, ...]
+    container: Path  # private parent of ``root``; holds nothing else
 
 
 @contextmanager
 def staged_snapshot(scope: Scope, resolution: ScopeResolution) -> Iterator[Snapshot]:
     """Copy the resolved files into a temporary directory that is removed on exit."""
-    root = Path(tempfile.mkdtemp(prefix="soterion-")).resolve()
+    container = Path(tempfile.mkdtemp(prefix="soterion-")).resolve()
+    root = container / FILES_DIRNAME
     try:
+        root.mkdir()
         files: list[str] = []
         skipped: list[SkippedPath] = []
         for relative in resolution.files:
@@ -43,9 +53,11 @@ def staged_snapshot(scope: Scope, resolution: ScopeResolution) -> Iterator[Snaps
                 files.append(relative)
             else:
                 skipped.append(SkippedPath(relative, reason))
-        yield Snapshot(root=root, files=tuple(files), skipped=tuple(skipped))
+        yield Snapshot(
+            root=root, files=tuple(files), skipped=tuple(skipped), container=container
+        )
     finally:
-        shutil.rmtree(root)
+        shutil.rmtree(container)
 
 
 def _copy_file(scope: Scope, relative: str, staging_root: Path) -> str | None:

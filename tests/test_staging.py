@@ -41,6 +41,16 @@ class Staging(RepoTestCase):
 
         self.assertFalse(root.exists())
 
+    def test_snapshot_sits_alone_inside_a_private_container(self) -> None:
+        self.add_file("a.py")
+
+        with staged_snapshot(*self.listed()) as snapshot:
+            container = snapshot.container
+            self.assertEqual(snapshot.root.parent, container)
+            self.assertEqual([path.name for path in container.iterdir()], ["files"])
+
+        self.assertFalse(container.exists())
+
     def test_snapshot_is_removed_when_the_scan_raises(self) -> None:
         self.add_file("a.py")
         roots = []

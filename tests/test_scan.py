@@ -62,6 +62,20 @@ class RunScan(RepoTestCase):
         self.assertEqual(captured[0]["files"], ["a.py"])
         self.assertFalse(Path(str(captured[0]["cwd"])).is_relative_to(self.repo))
 
+    def test_check_can_run_from_the_container_so_no_scanned_file_sits_at_its_root(self) -> None:
+        self.add_file("a.py")
+        captured: list[dict[str, object]] = []
+
+        def capture(raw: bytes) -> list[object]:
+            captured.append(json.loads(raw))
+            return []
+
+        self.scan(
+            fake_check(self.tool("lists", LIST_VISIBLE_FILES), parse=capture, run_in_container=True)
+        )
+
+        self.assertEqual(captured[0]["files"], ["files/a.py"])
+
     def test_tool_lookup_excludes_the_repository_and_the_snapshot(self) -> None:
         self.add_file("a.py")
         forbidden: list[Path] = []

@@ -42,9 +42,15 @@ class ToolRun:
     stdout: bytes = b""
 
 
-def find_tool(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path | None:
+def find_tool(
+    name: str,
+    *,
+    forbidden_roots: Sequence[Path] = (),
+    directories: Sequence[Path] | None = None,
+) -> Path | None:
     """Find ``name`` in the absolute entries of PATH, ignoring the current directory.
 
+    When ``directories`` is given, only those are searched and PATH is ignored.
     Executables located under any of ``forbidden_roots`` (the analyzed repository
     and its snapshot) are ignored so analyzed content can never be run as a tool.
     """
@@ -52,8 +58,12 @@ def find_tool(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path | None
         raise ValueError("tool name must be a bare file name")
     filename = f"{name}.exe" if os.name == "nt" else name
     forbidden = [Path(root).resolve() for root in forbidden_roots]
+    if directories is None:
+        entries = os.environ.get("PATH", "").split(os.pathsep)
+    else:
+        entries = [str(directory) for directory in directories]
 
-    for entry in os.environ.get("PATH", "").split(os.pathsep):
+    for entry in entries:
         entry = entry.strip('"')
         if not entry or entry.startswith(("\\\\", "//")) or not Path(entry).is_absolute():
             continue

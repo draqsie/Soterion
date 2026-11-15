@@ -9,11 +9,11 @@ It does not scan live systems, does not run the code it analyzes, and does not
 claim to find every vulnerability. A report always states which checks ran and
 which did not.
 
-## Status: Phase 1a
+## Status: Phase 1b (in progress)
 
-The scanning pipeline exists, but **no scanner adapter ships yet**. `scan`
-therefore always ends with "scan incomplete" for now. That is deliberate: an
-empty run must not look like a clean result.
+One check ships: hardcoded-secret detection. Source-code analysis and
+dependency checks are not implemented yet, so a clean result currently means
+only "no secret pattern matched".
 
 | Piece | State |
 |---|---|
@@ -22,8 +22,27 @@ empty run must not look like a clean result.
 | Private snapshot of in-scope files | implemented |
 | Hardened runner for external scanners | implemented |
 | Check orchestration and `scan` command | implemented |
-| Scanner adapters (SAST, dependencies, secrets) | not implemented |
+| Secret detection (gitleaks) | implemented |
+| Dependency vulnerabilities (OSV-Scanner) | not implemented |
+| Source-code analysis (Semgrep) | not implemented |
 | Reports, standards mapping, fixes | not implemented |
+
+## Checks
+
+| Check | Tool | Developed against | Network | What a finding means |
+|---|---|---|---|---|
+| `gitleaks` | [gitleaks](https://github.com/gitleaks/gitleaks) | 8.30.1 | none | A string matches a known credential pattern. Soterion does not test whether the credential is live, so every finding is `unverified`. |
+
+Soterion does not bundle or download scanners. Install the tool yourself,
+verify its published checksum, and either put it on `PATH` or pass its
+directory with `--tools-dir`. A check whose tool is missing is reported as
+`skipped` and the scan as incomplete.
+
+Suppressions inside the analyzed repository are not honored. For gitleaks that
+means `.gitleaksignore`, `.gitleaks.toml` and `gitleaks:allow` comments have no
+effect: repository content is untrusted and must not be able to hide findings.
+Secret values are redacted by the tool and are never copied into a finding;
+only the rule, file and line are kept.
 
 ## How a scan runs
 
@@ -31,7 +50,7 @@ empty run must not look like a clean result.
    and metadata only.
 2. Those files are copied into a private temporary directory. Each file is
    re-checked while it is copied; links and files that changed are skipped.
-3. Each scanner runs inside that copy, never in the repository. It is started
+3. Each scanner runs against that copy, never in the repository. It is started
    without a shell, from an absolute path outside the repository, with a
    minimal environment (no tokens or keys from your shell), closed standard
    input, a time limit and an output limit.
@@ -81,10 +100,14 @@ soterion scope-check /path/outside/the/repo/my.scope.toml
 ```
 
 ```bash
-soterion scan /path/outside/the/repo/my.scope.toml
+soterion scan /path/outside/the/repo/my.scope.toml --tools-dir /absolute/path/to/scanners
 ```
 
 `scope-check` exits `0` when the scope is valid and `2` when it is rejected.
+
+`--tools-dir` may be repeated. When it is given, `PATH` is not searched. Tools
+are never looked up in the current directory or inside the analyzed
+repository, and on Windows only `.exe` files are accepted.
 
 ## Known limitations
 
@@ -101,6 +124,16 @@ soterion scan /path/outside/the/repo/my.scope.toml
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -t .
 ```
+
+Tests that run a real scanner are skipped unless `SOTERION_TEST_TOOLS_DIR`
+names the directory that contains it:
+
+```bash
+SOTERION_TEST_TOOLS_DIR=/absolute/path/to/scanners PYTHONPATH=src python -m unittest discover -s tests -t .
+```
+
+Test fixtures build token-shaped strings at run time; no secret-like literal is
+stored in this repository.
 
 ## License
 
