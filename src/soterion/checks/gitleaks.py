@@ -25,8 +25,11 @@ from __future__ import annotations
 import json
 
 from soterion.findings import Confidence, Evidence, Finding, Severity, VerificationStatus
-from soterion.scan import ToolCheck
+from soterion.redact import SensitiveSpan
+from soterion.scan import ParsedOutput, ToolCheck
 from soterion.staging import Snapshot, snapshot_relative
+
+_MAX_SECRET_LINES = 2000
 
 CHECK_ID = "gitleaks"
 
@@ -41,15 +44,48 @@ _REMEDIATION = (
 )
 
 
-def parse_report(raw: bytes) -> list[Finding]:
-    """Convert a gitleaks JSON report into findings. Raises ValueError if it is malformed."""
+def parse_report(raw: bytes) -> ParsedOutput:
+    """Convert a gitleaks JSON report. Raises ValueError if it is malformed."""
     try:
         entries = json.loads(raw)
     except ValueError:
         raise ValueError("gitleaks report is not valid JSON") from None
     if not isinstance(entries, list):
         raise ValueError("gitleaks report is not a list")
-    return [_to_finding(entry) for entry in entries]
+    findings = [_to_finding(entry) for entry in entries]
+    spans = [span for entry, finding in zip(entries, findings) for span in _spans(entry, finding)]
+    return ParsedOutput(findings, sensitive_spans=spans)
+
+
+def _spans(entry: dict[str, object], finding: Finding) -> list[SensitiveSpan]:
+    """Where the reported match is, so its value can be masked in all other text.
+
+    Measured on gitleaks 8.30.1: columns are 1-based byte offsets within the
+    line and inclusive, but one too high on every line after the first. Both
+    readings are returned, so the value is still covered if that is ever fixed.
+    The match can be the secret itself or a whole ``name = "value"`` expression.
+    """
+    evidence = finding.evidence[0]
+    start_column, end_column = entry.get("StartColumn"), entry.get("EndColumn")
+    if type(start_column) is not int or type(end_column) is not int:
+        raise ValueError("gitleaks report entry has no usable columns")
+    if evidence.end_line - evidence.start_line > _MAX_SECRET_LINES:
+        raise ValueError("gitleaks reported an implausibly long secret")
+
+    spans: list[SensitiveSpan] = []
+    for shift in (1, 0):
+        first = max(start_column - 1 - shift, 0)
+        last = max(end_column - shift, 0)
+        if evidence.start_line == evidence.end_line:
+            spans.append(SensitiveSpan(evidence.path, evidence.start_line, first, last))
+            continue
+        spans.append(SensitiveSpan(evidence.path, evidence.start_line, first, None))
+        spans.extend(
+            SensitiveSpan(evidence.path, line)
+            for line in range(evidence.start_line + 1, evidence.end_line)
+        )
+        spans.append(SensitiveSpan(evidence.path, evidence.end_line, 0, last))
+    return spans
 
 
 def _to_finding(entry: object) -> Finding:
@@ -104,4 +140,7 @@ GITLEAKS = ToolCheck(
     arguments=_arguments,
     parse=parse_report,
     run_in_container=True,
+    locates_secrets=True,
+    version_arguments=("version",),
+    rule_set="rules built into the installed gitleaks",
 )

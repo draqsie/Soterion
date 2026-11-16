@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
+import json
 import os
 import sys
 import unittest
@@ -9,8 +11,16 @@ from pathlib import Path
 from unittest import mock
 
 from soterion.cli import display, main
+from soterion.redact import SensitiveSpan
 from soterion.scan import ParsedOutput, ToolCheck
-from tests.helpers import RepoTestCase, emitting, fake_check, locate_python, write_tool
+from tests.helpers import (
+    RepoTestCase,
+    emitting,
+    fake_check,
+    locate_python,
+    parse_items,
+    write_tool,
+)
 
 
 def run_cli(*argv: str) -> tuple[int, str, str]:
@@ -103,6 +113,22 @@ class ScanCommand(RepoTestCase):
 
         self.assertNotIn("limitations", out)
 
+    def test_warns_when_no_secret_locating_check_completed(self) -> None:
+        self.add_file("a.py")
+
+        _, out, _ = self.run_scan_command(fake_check(self.tool("quiet", emitting([]))))
+
+        self.assertIn("could only be masked by shape", out)
+
+    def test_does_not_warn_when_a_secret_locating_check_completed(self) -> None:
+        self.add_file("a.py")
+
+        _, out, _ = self.run_scan_command(
+            fake_check(self.tool("quiet", emitting([])), locates_secrets=True)
+        )
+
+        self.assertNotIn("masked by shape", out)
+
     def test_findings_exit_one_and_show_location_and_ratings(self) -> None:
         self.add_file("a.py")
         script = self.tool("reports", emitting([{"rule": "r1", "path": "a.py", "line": 1}]))
@@ -178,6 +204,88 @@ class ScanCommand(RepoTestCase):
         self.assertEqual(out, "")
         self.assertIn("authorization", err)
         self.assertFalse(marker.exists())
+
+
+class OutputDirOption(RepoTestCase):
+    def run_scan_command(self, *checks: ToolCheck, output: Path) -> tuple[int, str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = main(
+                ["scan", str(self.write_manifest()), "--output-dir", str(output)],
+                checks=checks,
+                locate=locate_python,
+            )
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def tool(self, name: str, source: str) -> Path:
+        return write_tool(self.tmp / "tools", name, source)
+
+    def test_report_is_written_to_the_named_directory_and_the_exit_code_is_unchanged(self) -> None:
+        self.add_file("a.py")
+        script = self.tool("reports", emitting([{"rule": "r1", "path": "a.py", "line": 1}]))
+
+        code, out, _ = self.run_scan_command(fake_check(script), output=self.tmp / "out")
+
+        document = json.loads((self.tmp / "out" / "soterion-report.json").read_text("utf-8"))
+        self.assertEqual(code, 1)
+        self.assertEqual(document["result"]["status"], "findings")
+        self.assertEqual([item["rule_id"] for item in document["findings"]], ["r1"])
+        self.assertIn("soterion-report.json", out)
+
+    def test_incomplete_scan_is_incomplete_in_the_report_too(self) -> None:
+        self.add_file("a.py")
+
+        code, _, _ = self.run_scan_command(
+            fake_check(Path("unused"), tool="not-installed"), output=self.tmp / "out"
+        )
+
+        document = json.loads((self.tmp / "out" / "soterion-report.json").read_text("utf-8"))
+        self.assertEqual(code, 3)
+        self.assertEqual(document["result"]["status"], "incomplete")
+        self.assertIs(document["result"]["complete"], False)
+
+    def test_output_directory_inside_the_repository_stops_before_anything_runs(self) -> None:
+        self.add_file("a.py")
+        marker = self.tmp / "ran.txt"
+        script = self.tool("marks", f"open({str(marker)!r}, 'w').write('ran')\nprint('[]')\n")
+
+        code, out, err = self.run_scan_command(fake_check(script), output=self.repo / "reports")
+
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("output directory", err)
+        self.assertFalse(marker.exists())
+        self.assertEqual(sorted(item.name for item in self.repo.iterdir()), ["a.py"])
+
+    def test_secret_quoted_by_a_scanner_reaches_neither_the_terminal_nor_the_report(self) -> None:
+        self.add_file("a.py", 'KEY = "s3cr3t-value-42"\n')
+        parse = parse_items("quoting")
+
+        def quote_the_line(raw: bytes) -> ParsedOutput:
+            (finding,) = parse(raw)
+            quoted = dataclasses.replace(
+                finding, title="value s3cr3t-value-42", impact="matched s3cr3t-value-42"
+            )
+            return ParsedOutput([quoted], problem="could not parse s3cr3t-value-42")
+
+        quoting = fake_check(
+            self.tool("reports", emitting([{"rule": "r1", "path": "a.py", "line": 1}])),
+            check_id="quoting",
+            parse=quote_the_line,
+        )
+        locating = fake_check(
+            self.tool("quiet", emitting([])),
+            check_id="locating",
+            parse=lambda raw: ParsedOutput([], sensitive_spans=[SensitiveSpan("a.py", 1, 7, 22)]),
+        )
+
+        _, out, err = self.run_scan_command(quoting, locating, output=self.tmp / "out")
+
+        written = (self.tmp / "out" / "soterion-report.json").read_text("utf-8")
+        self.assertNotIn("s3cr3t-value-42", out + err + written)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("[REDACTED]", written)
+        self.assertIn("3 value(s) masked", out)
 
 
 class ToolsDirOption(RepoTestCase):

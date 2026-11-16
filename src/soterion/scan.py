@@ -9,13 +9,17 @@ reported as skipped or failed; it is never folded into "no findings".
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from soterion.findings import CheckResult, CheckStatus, Finding, ScanSummary, summarize
+from soterion.redact import Redactor, SensitiveSpan, collect_sensitive_values
 from soterion.runner import ToolOutcome, find_tool, run_tool
+
+_VERSION = re.compile(r"\d+(?:\.\d+){1,3}")
 from soterion.scope import Scope, SkippedPath, resolve_files
 from soterion.staging import Snapshot, staged_snapshot
 
@@ -40,6 +44,9 @@ class ParsedOutput:
     problem: str = ""
     examined_files: frozenset[str] | None = None
     limitation: str = ""
+    # Where the tool located secrets. Their values are masked in everything the
+    # scan returns, including what other checks report.
+    sensitive_spans: Sequence[SensitiveSpan] = ()
 
 
 def _no_extra_environment(snapshot: Snapshot) -> Mapping[str, str]:
@@ -71,6 +78,23 @@ class ToolCheck:
     # Run from the snapshot's container instead of the copied files, for tools
     # that read suppression or configuration files from the directory they scan.
     run_in_container: bool = False
+    # For the report: arguments that make the tool print its version, and a
+    # description of the rules or data it checks against.
+    version_arguments: Sequence[str] = ()
+    rule_set: str = ""
+    # True for a check whose output says where secrets are (sensitive_spans).
+    locates_secrets: bool = False
+
+
+@dataclass(frozen=True)
+class CheckInfo:
+    """Facts about a check for the report header."""
+
+    check_id: str
+    tool: str
+    tool_version: str  # "unknown" when the check did not run or the tool did not say
+    rule_set: str
+    network_use: str  # empty unless the check ran with network access
 
 
 @dataclass(frozen=True)
@@ -81,6 +105,11 @@ class ScanReport:
     file_count: int
     summary: ScanSummary
     network_used: tuple[str, ...] = ()  # ids of the checks that were run with network access
+    check_info: tuple[CheckInfo, ...] = ()
+    redactions: int = 0  # how many pieces of text were masked
+    # False when no check that locates secrets completed. Text could then only
+    # be masked by well-known shapes, not by the actual values in the code.
+    secrets_located: bool = False
 
 
 def run_scan(
@@ -95,13 +124,32 @@ def run_scan(
     resolution = resolve_files(scope)
     results: list[CheckResult] = []
     findings: list[Finding] = []
+    info: list[CheckInfo] = []
+    sensitive_spans: list[SensitiveSpan] = []
     with staged_snapshot(scope, resolution) as snapshot:
         for check in checks:
-            result, accepted = _run_check(check, scope, snapshot, locate)
+            notes = _RunNotes()
+            result, accepted = _run_check(check, scope, snapshot, locate, notes)
             results.append(result)
             findings.extend(accepted)
+            sensitive_spans.extend(notes.sensitive_spans)
+            ran = result.status in (CheckStatus.COMPLETED, CheckStatus.FAILED)
+            info.append(
+                CheckInfo(
+                    check_id=check.check_id,
+                    tool=check.tool,
+                    tool_version=_tool_version(check, notes, snapshot),
+                    rule_set=check.rule_set,
+                    network_use=check.network_use if ran else "",
+                )
+            )
         skipped = resolution.skipped + snapshot.skipped
         file_count = len(snapshot.files)
+        # Everything a scanner or the repository could have put into text is masked
+        # here, while the snapshot still exists, so nothing returned holds a secret.
+        redactor = Redactor(collect_sensitive_values(snapshot.root, sensitive_spans))
+        findings = [redactor.finding(finding) for finding in findings]
+        results = [redactor.check(result) for result in results]
 
     return ScanReport(
         checks=tuple(results),
@@ -109,16 +157,42 @@ def run_scan(
         skipped=skipped,
         file_count=file_count,
         summary=summarize(results, findings, skipped_path_count=len(skipped)),
-        network_used=tuple(
-            check.check_id
+        network_used=tuple(item.check_id for item in info if item.network_use),
+        check_info=tuple(info),
+        redactions=redactor.count,
+        secrets_located=any(
+            check.locates_secrets and result.status is CheckStatus.COMPLETED
             for check, result in zip(checks, results, strict=True)
-            if check.network_use and result.status in (CheckStatus.COMPLETED, CheckStatus.FAILED)
         ),
     )
 
 
+@dataclass
+class _RunNotes:
+    """What a check run leaves behind besides its result."""
+
+    executable: Path | None = None
+    sensitive_spans: tuple[SensitiveSpan, ...] = ()
+
+
+def _tool_version(check: ToolCheck, notes: _RunNotes, snapshot: Snapshot) -> str:
+    if not check.version_arguments or notes.executable is None:
+        return "unknown"
+    run = run_tool(
+        [str(notes.executable), *check.version_arguments],
+        cwd=snapshot.scratch,
+        timeout_seconds=60,
+        max_output_bytes=10_000,
+        env=check.environment(snapshot),
+    )
+    if run.outcome is not ToolOutcome.EXITED:
+        return "unknown"
+    match = _VERSION.search(run.stdout.decode("utf-8", errors="replace"))
+    return match.group(0) if match else "unknown"
+
+
 def _run_check(
-    check: ToolCheck, scope: Scope, snapshot: Snapshot, locate: ToolLocator
+    check: ToolCheck, scope: Scope, snapshot: Snapshot, locate: ToolLocator, notes: _RunNotes
 ) -> tuple[CheckResult, tuple[Finding, ...]]:
     def outcome(status: CheckStatus, detail: str = "") -> CheckResult:
         return CheckResult(check.check_id, status, detail)
@@ -138,6 +212,7 @@ def _run_check(
     )
     if executable is None:
         return outcome(CheckStatus.SKIPPED, f"{check.tool} was not found on PATH"), ()
+    notes.executable = executable
 
     run = run_tool(
         [str(executable), *(str(argument) for argument in check.arguments(snapshot))],
@@ -168,6 +243,7 @@ def _run_check(
             parsed = check.parse(run.stdout)
         output = parsed if isinstance(parsed, ParsedOutput) else ParsedOutput(parsed)
         reported = tuple(output.findings)
+        notes.sensitive_spans = tuple(output.sensitive_spans)
     except Exception:  # noqa: BLE001 - output is untrusted; any parsing error fails the check
         return outcome(CheckStatus.FAILED, f"{check.tool} output could not be parsed"), ()
 

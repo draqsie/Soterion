@@ -227,4 +227,6 @@ OSV_SCANNER = ToolCheck(
         "queries api.osv.dev with the names and versions of the dependencies it finds"
     ),
     run_in_container=True,
+    version_arguments=("--version",),
+    rule_set="OSV advisory database, as published at scan time",
 )

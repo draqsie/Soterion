@@ -12,8 +12,9 @@ which did not.
 ## Status
 
 Three checks ship: hardcoded-secret detection, source-code pattern analysis and
-known vulnerabilities in dependencies. Reports, standards mapping and fix
-proposals are not implemented yet; see [ROADMAP.md](ROADMAP.md).
+known vulnerabilities in dependencies. Results can be written as a JSON report.
+Markdown and SARIF reports, standards mapping and fix proposals are not
+implemented yet; see [ROADMAP.md](ROADMAP.md).
 
 | Piece | State |
 |---|---|
@@ -26,7 +27,9 @@ proposals are not implemented yet; see [ROADMAP.md](ROADMAP.md).
 | Dependency vulnerabilities (OSV-Scanner) | implemented |
 | Source-code analysis (Semgrep) | implemented |
 | Configuration review (Dockerfile, GitHub Actions) | implemented, through the same Semgrep rule set |
-| Reports, standards mapping, fixes | not implemented |
+| Masking of secrets in scanner text | implemented |
+| JSON report | implemented |
+| Markdown and SARIF reports, standards mapping, fixes | not implemented |
 
 ## Checks
 
@@ -147,7 +150,7 @@ could not be examined.
 |---|---|
 | 0 | every check completed, no findings (not proof of absence) |
 | 1 | findings reported; each may be a false positive |
-| 2 | scope rejected, nothing was read |
+| 2 | scope or output directory rejected, nothing was analyzed |
 | 3 | scan incomplete; do not treat as clean |
 
 ## Scope manifest
@@ -189,6 +192,59 @@ soterion scan /path/outside/the/repo/my.scope.toml --tools-dir /absolute/path/to
 are never looked up in the current directory or inside the analyzed
 repository, and on Windows only `.exe` files are accepted.
 
+## Reports
+
+```bash
+soterion scan /path/outside/the/repo/my.scope.toml --output-dir /absolute/path/for/reports
+```
+
+With `--output-dir`, the scan also writes `soterion-report.json` there. Without
+it, no file is written. The directory must be an absolute path outside the
+analyzed repository; a path that leads into the repository through a link is
+refused too, and it is refused before any check runs.
+
+The report (`schema_version` 1) contains:
+
+- `result`: `no_findings`, `findings` or `incomplete`, a `complete` flag, and a
+  sentence that says what the result does and does not mean;
+- `scope`: the patterns, limits and permissions that applied. The repository is
+  identified by its directory name only, not its full path, and the
+  authorization is recorded as self-declared and not verified;
+- `checks`: every check with its state, tool version, rule set and network use;
+- `skipped_paths`: in-scope paths that no check examined;
+- `findings`: ordered by severity, each with its evidence, ratings and
+  verification status, and `same_location_as`, which links findings from
+  different checks on the same lines instead of merging them;
+- `masking`: how many values were masked and whether located secrets were
+  available for masking.
+
+## Masking
+
+Text that comes from a scanner or the repository can quote source code, and
+with it a secret. Before a scan returns anything, that text passes through one
+masking step, so the terminal output and the report are built from masked text
+only.
+
+- **Exact values.** gitleaks reports where each secret is. The bytes at those
+  locations are read from the private copy, kept in memory for the duration of
+  the scan, and replaced by `[REDACTED]` wherever they appear, including in the
+  findings and error details of other checks.
+- **Well-known shapes.** Private key blocks, a few provider token formats and
+  e-mail addresses are masked wherever they appear, located or not.
+
+Limits you should know:
+
+- A secret that no check located and that matches none of the shapes is not
+  masked.
+- If gitleaks is missing, fails or times out, there are no located values. The
+  scan output then carries a warning and the report sets
+  `masking.secrets_located` to `false`. Treat such output as possibly
+  containing secrets.
+- File paths are not masked.
+- The name of a setting next to a secret (`client_secret = "..."`) is kept; a
+  word of 16 or more characters on the same line as a located secret is masked
+  as a precaution.
+
 ## Known limitations
 
 - Hard links are not detected.
@@ -196,8 +252,8 @@ repository, and on Windows only `.exe` files are accepted.
   confined to a job object.
 - Scanner standard error is discarded, so a failed check reports only its exit
   code.
-- A Semgrep finding's description comes from the rule's message, which can
-  quote the matched code. Reports with redaction are not implemented yet.
+- Masking has the limits described under "Masking"; it is not a guarantee
+  that no secret appears in output.
 - Proxy settings are not passed to scanners, so a check that needs the network
   fails behind a proxy that requires them.
 - A local user who can modify the repository while a scan is running is outside
@@ -219,6 +275,11 @@ SOTERION_TEST_TOOLS_DIR=/absolute/path/to/scanners SOTERION_TEST_NETWORK=1 PYTHO
 
 Test fixtures build token-shaped strings at run time; no secret-like literal is
 stored in this repository.
+
+Tests that use the network depend on semgrep.dev and api.osv.dev being
+reachable. When one is not, the affected check is reported as failed and its
+tests fail; run them again before concluding that something is broken. A
+computer that goes to sleep during a run makes scanners time out the same way.
 
 ## License
 

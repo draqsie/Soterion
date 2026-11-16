@@ -36,28 +36,29 @@ automatic merge or deploy.
 | 1c. Source-code analysis | Semgrep adapter; per-check network permission; parse errors and uncovered files make the check incomplete |
 | 1d. Dependency vulnerabilities | OSV-Scanner adapter; manifest line as evidence; repository `osv-scanner.toml` cannot hide a vulnerability; "not applicable" when no manifest is in scope |
 | 1e. Configuration review | Dockerfile and GitHub Actions findings through Semgrep's `p/default` rules; measured coverage documented; a rule skipped on an embedded snippet is a visible limitation instead of a failed check |
+| 2a. Masking and JSON report | One masking step for all scanner and repository text, using the secret locations gitleaks reports plus well-known shapes; versioned JSON report with scope, checks, tool versions and linked same-location findings; `--output-dir` refused when it is or leads into the repository |
 
 ## To do
 
-### 2. Reports
+### 2b. Markdown report
 
-Machine- and human-readable output that can be attached to a review.
-
-- JSON report (stable schema, versioned), Markdown report and SARIF 2.1.0.
-- One redaction pass over every text field that originates from a scanner or
-  the repository, applied before anything is written.
-- Report header that lists every check with its state, tool version, rule set,
-  network use, skipped paths and the scope that was applied.
-- Duplicate findings from different tools at the same location are grouped,
-  not dropped.
+The same content as the JSON report, for people.
 
 Complete when:
-- a seeded secret does not appear in any report, log or terminal output, even
-  when a scanner message quotes it;
-- the SARIF file validates against the published 2.1.0 schema;
-- an incomplete scan is unmistakable in all three formats;
-- reports are written only to a directory the operator names, never into the
-  analyzed repository.
+- an incomplete scan is unmistakable at the top of the document;
+- text from scanners cannot change the document's structure (no injected
+  headings, links, HTML or tables);
+- it is built from the same masked data as the JSON report.
+
+### 2c. SARIF report
+
+SARIF 2.1.0, for tools that display code-scanning results.
+
+Complete when:
+- the file validates against the published 2.1.0 schema;
+- checks that failed or were skipped are reported as tool execution
+  notifications, so an incomplete scan does not look like a clean one;
+- severity, confidence and verification status survive the conversion.
 
 ### 3. Standards mapping
 
@@ -164,7 +165,8 @@ Complete when:
 | License | Not chosen |
 | Checks the operator deliberately leaves off | Reported as skipped, so the scan is incomplete. An explicit "disabled by operator" state would let such a scan end cleanly while still listing what did not run. |
 | Semgrep rule set | `p/default`, fetched at scan time, so results can change between scans. Pinning or vendoring rules depends on their license. |
-| Evidence snippets | Not stored. Adding them depends on the redaction pass in step 2. |
+| Evidence snippets | Not stored. The masking step now exists, but a snippet is the most likely place for an unlocated secret, so adding them needs its own decision. |
+| Scanner text when no secret was located | Shown, with a warning in the output and `masking.secrets_located: false` in the report. The stricter alternative is to withhold scanner messages entirely unless the secret check completed. |
 | Dockerfile coverage | Limited to what Semgrep's default rules flag (see the README table). A dedicated Dockerfile linter would be a new check and a new tool to install. |
 | Rule evaluations skipped on embedded snippets | Reported as a limitation of a completed check, so an ordinary workflow does not make every scan incomplete. The stricter alternative is to fail the check. |
 | Transitive dependencies | Not resolved, because resolution contacts a second service. Could become a separate, separately permitted check. |

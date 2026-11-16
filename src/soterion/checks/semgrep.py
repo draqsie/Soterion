@@ -231,7 +231,12 @@ def _arguments(snapshot: Snapshot) -> list[str]:
 def _environment(snapshot: Snapshot) -> dict[str, str]:
     home = snapshot.scratch / "semgrep-home"
     home.mkdir(exist_ok=True)
-    return {"USERPROFILE": str(home), "HOME": str(home), "SEMGREP_SEND_METRICS": "off"}
+    return {
+        "USERPROFILE": str(home),
+        "HOME": str(home),
+        "SEMGREP_SEND_METRICS": "off",
+        "SEMGREP_ENABLE_VERSION_CHECK": "0",
+    }
 
 
 SEMGREP = ToolCheck(
@@ -244,4 +249,6 @@ SEMGREP = ToolCheck(
     environment=_environment,
     network_use=f"downloads the {RULESET} rule set from semgrep.dev; usage metrics are disabled",
     run_in_container=True,
+    version_arguments=("--version",),
+    rule_set=f"{RULESET} from the Semgrep registry, as published at scan time",
 )

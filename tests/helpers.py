@@ -125,6 +125,12 @@ def fake_github_token() -> str:
     return "ghp_" + "".join(generator.choice(alphabet) for _ in range(36))
 
 
+def fake_api_value(seed: int) -> str:
+    """A random-looking 32-character value with no recognizable token shape."""
+    generator = random.Random(seed)
+    return "".join(generator.choice(string.ascii_letters + string.digits) for _ in range(32))
+
+
 def make_symlink(link: Path, target: Path) -> None:
     try:
         os.symlink(target, link, target_is_directory=target.is_dir())

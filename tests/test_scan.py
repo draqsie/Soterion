@@ -7,7 +7,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from soterion.findings import CheckResult, CheckStatus, ScanStatus
-from soterion.scan import ParsedOutput, ScanReport, ToolCheck, run_scan
+from soterion.redact import MASK, SensitiveSpan
+from soterion.scan import CheckInfo, ParsedOutput, ScanReport, ToolCheck, run_scan
 from soterion.scope import SkippedPath, load_scope
 from soterion.staging import Snapshot
 from tests.helpers import (
@@ -332,6 +333,93 @@ class RunScan(RepoTestCase):
         self.assertEqual(report.checks[0].status, CheckStatus.FAILED)
         self.assertIn("1 file broken", report.checks[0].detail)
         self.assertIn("1 rule skipped", report.checks[0].detail)
+
+    def test_secret_located_by_one_check_is_masked_in_what_the_other_checks_report(self) -> None:
+        self.add_file("a.py", 'KEY = "s3cr3t-value-42"\n')
+        quiet = self.tool("quiet", emitting([]))
+        reports = self.tool("reports", emitting([{"rule": "r1", "path": "a.py", "line": 1}]))
+        parse = parse_items("quoting")
+
+        def quote_the_line(raw: bytes) -> ParsedOutput:
+            (finding,) = parse(raw)
+            quoted = dataclasses.replace(finding, impact="matched s3cr3t-value-42 in the code")
+            return ParsedOutput([quoted], problem="line with s3cr3t-value-42 was not parsed")
+
+        report = self.scan(
+            fake_check(reports, check_id="quoting", parse=quote_the_line),
+            fake_check(
+                quiet,
+                check_id="locating",
+                parse=lambda raw: ParsedOutput(
+                    [], sensitive_spans=[SensitiveSpan("a.py", 1, 7, 22)]
+                ),
+            ),
+        )
+
+        self.assertEqual(report.findings[0].impact, f"matched {MASK} in the code")
+        self.assertEqual(report.checks[0].detail, f"line with {MASK} was not parsed")
+        self.assertEqual(report.redactions, 2)
+        self.assertNotIn("s3cr3t-value-42", repr(report))
+
+    def test_scan_says_whether_a_secret_locating_check_completed(self) -> None:
+        self.add_file("a.py")
+        quiet = self.tool("quiet", emitting([]))
+        cases = (
+            ([fake_check(quiet, locates_secrets=True)], True),
+            ([fake_check(quiet)], False),
+            ([fake_check(Path("unused"), tool="not-installed", locates_secrets=True)], False),
+            ([fake_check(self.tool("crashes", emitting([], exit_code=7)), locates_secrets=True)], False),
+            ([], False),
+        )
+        for checks, expected in cases:
+            with self.subTest(expected=expected, checks=len(checks)):
+                self.assertIs(self.scan(*checks).secrets_located, expected)
+
+    def test_tool_version_and_rule_set_are_recorded_for_a_check_that_ran(self) -> None:
+        self.add_file("a.py")
+        check = fake_check(
+            self.tool("quiet", emitting([])),
+            version_arguments=("-I", "-c", "print('stand-in scanner version 9.8.7 (build 5)')"),
+            rule_set="built-in rules",
+        )
+
+        report = self.scan(check)
+
+        self.assertEqual(
+            report.check_info,
+            (
+                CheckInfo(
+                    check_id="fake",
+                    tool="fake-scanner",
+                    tool_version="9.8.7",
+                    rule_set="built-in rules",
+                    network_use="",
+                ),
+            ),
+        )
+
+    def test_tool_version_is_unknown_when_the_tool_does_not_say(self) -> None:
+        self.add_file("a.py")
+        silent = fake_check(self.tool("quiet", emitting([])), version_arguments=("-I", "-c", "pass"))
+        no_probe = fake_check(self.tool("quiet", emitting([])), check_id="second")
+
+        report = self.scan(silent, no_probe)
+
+        self.assertEqual([info.tool_version for info in report.check_info], ["unknown", "unknown"])
+
+    def test_tool_version_is_not_probed_for_a_check_that_did_not_run(self) -> None:
+        self.add_file("a.py")
+        marker = self.tmp / "probed.txt"
+        check = fake_check(
+            Path("unused"),
+            network_use="downloads rules from example.test",
+            version_arguments=("-I", "-c", f"open({str(marker)!r}, 'w').write('x')"),
+        )
+
+        report = self.scan(check)
+
+        self.assertFalse(marker.exists())
+        self.assertEqual(report.check_info[0].tool_version, "unknown")
 
     def test_in_scope_file_the_tool_did_not_examine_fails_the_check(self) -> None:
         self.add_file("a.py")

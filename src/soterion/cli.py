@@ -5,18 +5,26 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from soterion import __version__
-from soterion.findings import CheckStatus, ScanStatus
-from soterion.runner import find_tool
 from soterion.checks import DEFAULT_CHECKS
-from soterion.scan import ScanReport, ToolCheck, ToolLocator, run_scan
+from soterion.findings import ScanStatus
+from soterion.report import (
+    ReportError,
+    build_report,
+    prepare_output_dir,
+    result_statement,
+    write_json_report,
+)
+from soterion.runner import find_tool
+from soterion.scan import ToolCheck, ToolLocator, run_scan
 from soterion.scope import Scope, ScopeError, SkippedPath, load_scope, resolve_files
 
 EXIT_NO_FINDINGS = 0
 EXIT_FINDINGS = 1
-EXIT_SCOPE_REJECTED = 2
+EXIT_REJECTED = 2  # the scope or the output directory was refused; nothing was analyzed
 EXIT_INCOMPLETE = 3
 
 
@@ -54,6 +62,13 @@ def main(
         help="absolute directory holding scanner executables; repeatable. "
         "When given, PATH is not searched.",
     )
+    scan.add_argument(
+        "--output-dir",
+        type=Path,
+        metavar="DIR",
+        help="absolute directory, outside the analyzed repository, to write the report to. "
+        "Without it, no file is written.",
+    )
     args = parser.parse_args(argv)
 
     tools_dirs: list[Path] | None = getattr(args, "tools_dir", None)
@@ -72,12 +87,12 @@ def main(
         scope = load_scope(args.manifest)
         if args.command == "scope-check":
             return _scope_check(scope)
-        return _scan(scope, checks, locate)
+        return _scan(scope, checks, locate, args.output_dir)
     except ScopeError as error:
         print("Scope rejected; nothing was analyzed:", file=sys.stderr)
         for problem in error.problems:
             print(f"  - {display(problem)}", file=sys.stderr)
-        return EXIT_SCOPE_REJECTED
+        return EXIT_REJECTED
 
 
 def _print_scope(scope: Scope) -> None:
@@ -100,7 +115,18 @@ def _scope_check(scope: Scope) -> int:
     return EXIT_NO_FINDINGS
 
 
-def _scan(scope: Scope, checks: Sequence[ToolCheck], locate: ToolLocator) -> int:
+def _scan(
+    scope: Scope, checks: Sequence[ToolCheck], locate: ToolLocator, output_dir: Path | None
+) -> int:
+    report_dir = None
+    if output_dir is not None:
+        # Refused before anything runs, so a scan is never done and then lost.
+        try:
+            report_dir = prepare_output_dir(output_dir, scope.repo_root)
+        except ReportError as error:
+            print(f"Output directory rejected; nothing was analyzed: {error}", file=sys.stderr)
+            return EXIT_REJECTED
+
     report = run_scan(scope, checks, locate=locate)
     _print_scope(scope)
     print(f"{report.file_count} files examined")
@@ -126,41 +152,29 @@ def _scan(scope: Scope, checks: Sequence[ToolCheck], locate: ToolLocator) -> int
             f"[{display(finding.rule_id)}] at {display(first.path)}:{first.start_line}"
         )
 
-    print(_result_line(report))
-    return {
+    if report.redactions:
+        print(f"{report.redactions} value(s) masked in scanner text")
+    if not report.secrets_located:
+        print(
+            "Warning: no secret-detection check completed, so scanner text could only be "
+            "masked by shape. Treat this output and any report as possibly containing secrets."
+        )
+    print(f"Result: {result_statement(report)}")
+
+    exit_code = {
         ScanStatus.NO_FINDINGS: EXIT_NO_FINDINGS,
         ScanStatus.FINDINGS: EXIT_FINDINGS,
         ScanStatus.INCOMPLETE: EXIT_INCOMPLETE,
     }[report.summary.status]
-
-
-def _result_line(report: ScanReport) -> str:
-    summary = report.summary
-    limited = any(
-        check.status is CheckStatus.COMPLETED and check.detail for check in report.checks
-    )
-    caveat = " Some checks completed with limitations; see the check list above." if limited else ""
-    if summary.status is ScanStatus.NO_FINDINGS:
-        return (
-            "Result: no findings from the checks listed above. "
-            "This is not proof that the code is free of vulnerabilities." + caveat
-        )
-    if summary.status is ScanStatus.FINDINGS:
-        return (
-            f"Result: {summary.finding_count} finding(s). Each is a scanner report and may be "
-            "a false positive; review the evidence before acting." + caveat
-        )
-    reasons = []
-    if not any(check.status is CheckStatus.COMPLETED for check in report.checks):
-        reasons.append("no check completed")
-    if summary.incomplete_checks:
-        reasons.append(f"checks that did not complete: {', '.join(summary.incomplete_checks)}")
-    if summary.skipped_path_count:
-        reasons.append(f"{summary.skipped_path_count} in-scope path(s) were not examined")
-    return (
-        f"Result: scan incomplete ({display('; '.join(reasons))}). "
-        f"{summary.finding_count} finding(s) so far. Do not treat this as a clean result."
-    )
+    if report_dir is not None:
+        document = build_report(scope, report, generated_at=datetime.now(UTC))
+        try:
+            written = write_json_report(document, report_dir)
+        except ReportError as error:
+            print(f"Report not written: {error}", file=sys.stderr)
+            return EXIT_INCOMPLETE
+        print(f"Report written to {display(str(written))}")
+    return exit_code
 
 
 if __name__ == "__main__":
